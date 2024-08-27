@@ -1,3 +1,5 @@
+import time
+from decimal import Decimal
 
 import anvil.server
 import requests
@@ -12,7 +14,7 @@ import traceback
 
 
 # Connect to Anvil using the Uplink key
-anvil.server.connect("server_S5LMMJKF72T7BTYDU6W3SCLQ-XFUY32F4IMRVXCL3")
+anvil.server.connect("server_SPX2DC7DU4I7VPAPVYVTN2VR-CCTPKIGGPJYMNPYV")
 # # API Configuration
 API_URL = "https://api.exchangerate-api.com/v4/latest/USD"
 COUNTRY_LIST = {
@@ -226,6 +228,11 @@ def get_users_from_db():
         print(f"Error fetching users: {e}")
         traceback.print_exc()  # Print full exception traceback
         return None
+
+@anvil.server.callable
+def get_user_details_by_phone(phone_number):
+    return get_user_details(phone_number)
+
 def get_user_details(phone_number):
     try:
         conn = get_db_connection()
@@ -259,10 +266,6 @@ def get_user_details(phone_number):
     except Exception as e:
         print("Error occurred while fetching user details:", e)
         return None
-
-@anvil.server.callable
-def get_user_details_by_phone(phone_number):
-    return get_user_details(phone_number)
 
 def fetch_currency_data():
     """Fetches currency data from the API."""
@@ -349,6 +352,389 @@ def create_table():
         print("Table admins_add_currency created successfully.")
     except Exception as e:
         print(f"Error creating table: {e}")
+
+def generate_userid():
+    conn = psycopg2.connect(**conn_params)
+    cur = conn.cursor()
+
+    cur.execute("SELECT user_id FROM users WHERE user_id LIKE 'DupS%' ORDER BY user_id DESC LIMIT 1;")
+    last_userid = cur.fetchone()
+
+    if last_userid:
+        last_number = int(last_userid[0][4:]) + 1
+    else:
+        last_number = 1
+
+    new_userid = f"DupS{last_number:04d}"
+
+    cur.close()
+    conn.close()
+
+    return new_userid
+
+def generate_userid_customer():
+    conn = psycopg2.connect(**conn_params)
+    cur = conn.cursor()
+
+    cur.execute("SELECT user_id FROM users WHERE user_id LIKE 'DupC%' ORDER BY user_id DESC LIMIT 1;")
+    last_userid = cur.fetchone()
+
+    if last_userid:
+        last_number = int(last_userid[0][4:]) + 1
+    else:
+        last_number = 1
+
+    new_userid = f"DupC{last_number:04d}"
+
+    cur.close()
+    conn.close()
+
+    return new_userid
+
+#signup register
+@anvil.server.callable
+def add_infor(username, email, address, phone, aadhar, pan, password, user_type):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    user_id = generate_userid_customer()
+    joined_date = datetime.now()  # Get the current date and time
+    hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+  
+    try:
+        cur.execute("""
+            INSERT INTO users (
+                user_id, 
+                user_fullname, 
+                user_email, 
+                user_address_line_1, 
+                user_phone_number, 
+                user_aadhar_number, 
+                user_pan_number, 
+                user_password,
+                user_type,
+                user_joined_date
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+        """, (user_id, username, email, address, phone, aadhar, pan, hashed_password, 'customer', joined_date))
+
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"Error inserting data: {e}")
+    finally:
+        cur.close()
+        conn.close()
+    
+    return user_id
+
+# phone number checking
+@anvil.server.callable
+def get_user_by_phone(phone_number):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE user_phone_number=%s", (phone_number,))
+        user = cur.fetchone()
+        cur.close()
+        conn.close()
+        return user
+    except Exception as e:
+        print(f"Error retrieving user by phone: {e}")
+        return {"error": str(e)}
+
+#email exists or not checking
+@anvil.server.callable
+def check_email_exists(email):
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    # Check if email exists in the database
+    cur.execute("SELECT 1 FROM users WHERE user_email = %s", (email,))
+    user_exists = cur.fetchone() is not None
+
+    cur.close()
+    conn.close()
+    return user_exists
+
+# status column update for the user_banned and user_hold at a time of view user details
+def ensure_user_banned_column_exists(connection):
+    """Ensure the user_banned column exists in the users table"""
+    with connection.cursor() as cursor:
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS user_banned BOOLEAN DEFAULT FALSE")
+    connection.commit()  # Ensure the change is committed
+  
+@anvil.server.callable
+def toggle_user_status(phone_number):
+    """Toggle the freeze/unfreeze status of a user"""
+    connection = get_db_connection()
+    try:
+        # Ensure the user_banned column exists
+        ensure_user_banned_column_exists(connection)
+
+        with connection.cursor() as cursor:
+            # Fetch the current hold status
+            cursor.execute(
+                "SELECT user_hold FROM users WHERE user_phone_number = %s",
+                (phone_number,)
+            )
+            result = cursor.fetchone()
+            if result is None:
+                return None  # User not found
+
+            current_hold_status = result[0]
+
+            # Toggle the hold status
+            new_hold_status = not current_hold_status if current_hold_status else True
+
+            # Update user_hold and user_banned columns
+            cursor.execute(
+                """
+                UPDATE users 
+                SET user_hold = %s, user_banned = %s
+                WHERE user_phone_number = %s
+                RETURNING user_fullname, user_phone_number, user_hold, user_banned
+                """,
+                (new_hold_status, new_hold_status, phone_number)
+            )
+
+            # Fetch the updated user details
+            updated_user = cursor.fetchone()
+            connection.commit()
+
+            # Return the updated user as a dictionary
+            return {
+                'user_fullname': updated_user[0],
+                'user_phone_number': updated_user[1],
+                'user_hold': updated_user[2],
+                'user_banned': updated_user[3],
+            }
+    finally:
+        connection.close()
+
+# Ensure the balance_phone column exists
+def ensure_user_balance_phone_column_exists(connection):
+    """Ensure the balance_phone column exists in the currency_converter_usercurrency table"""
+    with connection.cursor() as cursor:
+        cursor.execute("ALTER TABLE currency_converter_usercurrency ADD COLUMN IF NOT EXISTS balance_phone STRING")
+    connection.commit()  # Ensure the change is committed
+
+# Function to delete a user if they have no balances
+@anvil.server.callable
+def delete_user_if_no_balances(phone_number):
+    """Delete a user if they have no balances"""
+    connection = get_db_connection()
+    try:
+        ensure_user_balance_phone_column_exists(connection)
+        with connection.cursor() as cursor:
+            # Check if the user has balances by matching phone numbers
+            cursor.execute(
+                "SELECT EXISTS (SELECT 1 FROM currency_converter_usercurrency WHERE balance_phone = %s AND balance > 0) AS has_balances",
+                (str(phone_number),)  # Ensure phone_number is treated as a string
+            )
+            result = cursor.fetchone()
+            has_balances = result[0]
+
+            if not has_balances:
+                # No balances found, delete the user
+                cursor.execute(
+                    "DELETE FROM users WHERE user_phone_number = %s RETURNING user_fullname, user_phone_number",
+                    (str(phone_number),)  # Ensure phone_number is treated as a string
+                )
+                deleted_user = cursor.fetchone()
+                connection.commit()
+                
+                if deleted_user:
+                    return {
+                        'user_fullname': deleted_user[0],
+                        'user_phone_number': deleted_user[1],
+                        'status': 'User deleted successfully.'
+                    }
+            else:
+                # User has balances, cannot delete
+                return {
+                    'status': 'User has balances. Please clear the balances before deleting.'
+                }
+    finally:
+        connection.close()
+
+# set limit for daily and monthly transactions 
+def add_limit_columns_if_not_exists(connection):
+    """Add limit columns if they don't exist."""
+    with connection.cursor() as cursor:
+        cursor.execute("""
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS user_daily_limit NUMERIC;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS user_monthly_limit NUMERIC;
+        """)
+    connection.commit()
+
+@anvil.server.callable
+def update_user_limit(phone_number, field_to_update, new_limit):
+    """Update the user's daily or monthly limit."""
+    connection = get_db_connection()
+    try:
+        # Ensure the limit columns exist
+        add_limit_columns_if_not_exists(connection)
+        
+        with connection.cursor() as cursor:
+            # Update the specified limit for the user
+            query = f"""
+            UPDATE users
+            SET {field_to_update} = %s
+            WHERE user_phone_number = %s
+            RETURNING user_fullname, user_phone_number, {field_to_update}
+            """
+            cursor.execute(query, (new_limit, phone_number))
+            updated_user = cursor.fetchone()
+            connection.commit()
+
+            if updated_user:
+                # Convert Decimal to float if necessary
+                limit_value = float(updated_user[2]) if isinstance(updated_user[2], Decimal) else updated_user[2]
+                
+                return {
+                    'user_fullname': updated_user[0],  # Fullname of the user associated with phone_number
+                    'user_phone_number': updated_user[1],
+                    field_to_update: limit_value,
+                    'status': f'{field_to_update} updated successfully.'
+                }
+    finally:
+        connection.close()
+      
+def create_table_wallet(connection):
+    """Create the wallet_admins_actions table if it doesn't exist."""
+    with connection.cursor() as cursor:
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS wallet_admins_actions (
+            id SERIAL PRIMARY KEY,
+            admins_actions_name TEXT,
+            admins_actions_username TEXT,
+            admins_actions TEXT,
+            admins_actions_date TIMESTAMP,
+            admin_email TEXT
+        )
+        """)
+    connection.commit()
+
+@anvil.server.callable
+def log_action(phone_number, changes, admin_fullname, admin_email):
+    """Log actions to the 'wallet_admins_actions' table."""
+    connection = get_db_connection()
+    try:
+        create_table_wallet(connection)
+        with connection.cursor() as cursor:
+            # Retrieve user by phone number
+            cursor.execute("SELECT user_fullname FROM users WHERE user_phone_number = %s", (phone_number,))
+            user = cursor.fetchone()
+
+            # Get the full name of the user associated with the phone number
+            user_fullname = None
+            if user:
+                user_fullname = user[0]  # Adjust based on the actual column position
+
+            # Insert log action into 'wallet_admins_actions' table
+            query = """
+            INSERT INTO wallet_admins_actions (
+                admins_actions_name, admins_actions_username, admins_actions, admins_actions_date, admin_email
+            )
+            VALUES (%s, %s, %s, %s, %s)
+            """
+            cursor.execute(query, (
+                admin_fullname,      # Admin's full name
+                user_fullname,       # User's full name
+                ", ".join(changes),
+                datetime.now(),
+                admin_email
+            ))
+            connection.commit()
+    finally:
+        connection.close()
+      
+# audit trail related
+@anvil.server.callable
+def fetch_all_actions():
+    """Fetch all actions from the wallet_admins_actions table."""
+    connection = get_db_connection()
+    actions = []
+    try:
+        with connection.cursor() as cursor:
+            # Query to fetch all actions from the wallet_admins_actions table
+            query = """
+            SELECT admins_actions_name, admins_actions_username, admins_actions, admins_actions_date, admin_email
+            FROM wallet_admins_actions
+            ORDER BY admins_actions_date DESC
+            """
+            cursor.execute(query)
+            actions = cursor.fetchall()
+    finally:
+        connection.close()
+    
+    # Return the actions as a list of dictionaries
+    return [
+        {
+            'admins_actions_name': row[0],
+            'admins_actions_username': row[1],
+            'admins_actions': row[2],
+            'admins_actions_date': row[3],
+            'admin_email': row[4]
+        }
+        for row in actions
+    ]
+
+@anvil.server.callable
+def search_actions_by_username(username):
+    """Search actions by username in the wallet_admins_actions table."""
+    connection = get_db_connection()
+    actions = []
+    try:
+        with connection.cursor() as cursor:
+            # Query to search actions by username
+            query = """
+            SELECT admins_actions_name, admins_actions_username, admins_actions, admins_actions_date, admin_email
+            FROM wallet_admins_actions
+            WHERE admins_actions_username = %s
+            ORDER BY admins_actions_date DESC
+            """
+            cursor.execute(query, (username,))
+            actions = cursor.fetchall()
+    finally:
+        connection.close()
+
+    # Return the actions as a list of dictionaries
+    return [
+        {
+            'admins_actions_name': row[0],
+            'admins_actions_username': row[1],
+            'admins_actions': row[2],
+            'admins_actions_date': row[3],
+            'admin_email': row[4]
+        }
+        for row in actions
+    ]
+
+@anvil.server.callable
+def get_user(phone_number):
+    """Get user details by phone number"""
+    connection = get_db_connection()
+    try:
+        # Ensure the user_banned column exists
+        ensure_user_banned_column_exists(connection)
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT user_fullname, user_phone_number, user_hold, user_banned FROM users WHERE user_phone_number = %s",
+                (phone_number,)
+            )
+            user = cursor.fetchone()
+            if user:
+                return {
+                    'user_fullname': user[0],
+                    'user_phone_number': user[1],
+                    'user_hold': user[2],
+                    'user_banned': user[3],
+                }
+            else:
+                return None
+    finally:
+        connection.close()
 
 # create_table()
 
@@ -465,7 +851,7 @@ def generate_user_id():
     cur = conn.cursor()
 
     # Fetch the last generated user_id
-    cur.execute("SELECT user_id FROM users WHERE user_id LIKE 'dupA%' ORDER BY user_id DESC LIMIT 1;")
+    cur.execute("SELECT user_id FROM users WHERE user_id LIKE 'DupA%' ORDER BY user_id DESC LIMIT 1;")
     last_user_id = cur.fetchone()
 
     if last_user_id:
@@ -475,7 +861,7 @@ def generate_user_id():
         new_id_number = 1  # Start with 1 if no users exist
 
     # Generate new user_id with the pattern dupA0001, dupA0002, etc.
-    new_user_id = f"dupA{new_id_number:04d}"
+    new_user_id = f"DupA{new_id_number:04d}"
 
     cur.close()
     conn.close()
