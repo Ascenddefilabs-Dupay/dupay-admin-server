@@ -11,10 +11,11 @@ import cloudinary
 import cloudinary.uploader
 import cloudinary.api
 import traceback
+import decimal
 
 
 # Connect to Anvil using the Uplink key
-anvil.server.connect("server_SPX2DC7DU4I7VPAPVYVTN2VR-CCTPKIGGPJYMNPYV")
+anvil.server.connect("server_UM4DBKAZUPY673J646YDJPZV-M46VHV6ZUR2C56JM")
 # # API Configuration
 API_URL = "https://api.exchangerate-api.com/v4/latest/USD"
 COUNTRY_LIST = {
@@ -194,7 +195,66 @@ conn_params = {
 def get_db_connection():
     """Establishes a new database connection."""
     return psycopg2.connect(**conn_params)
+@anvil.server.callable
+def get_wallet_transactions():
+    conn = get_db_connection()
+    if not conn:
+        print("Failed to connect to the database")
+        return []
 
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT transaction_timestamp, transaction_amount, transaction_status, transaction_type, sender_mobile_number, transaction_currency FROM transaction_table")
+        transactions = cursor.fetchall()
+        
+        # print(f"Fetched {len(transactions)} transactions from the database")
+
+        transaction_dicts = []
+        for transaction in transactions:
+            # print(f"Processing transaction: {transaction}")
+            transaction_dicts.append({
+                'transaction_timestamp': transaction[0],
+                'transaction_amount': float(transaction[1]) if isinstance(transaction[1], decimal.Decimal) else transaction[1],
+                'transaction_status': transaction[2],
+                'transaction_type': transaction[3],
+                'sender_mobile_number': transaction[4],
+                'transaction_currency': transaction[5]
+            })
+
+        cursor.close()
+        return transaction_dicts
+    except Exception as e:
+        print(f"Error fetching wallet transactions: {e}")
+        return []
+    finally:
+        conn.close()
+
+@anvil.server.callable
+def get_user_data(phone_number):
+    conn = get_db_connection()
+    if not conn:
+        print("Failed to connect to the database")
+        return None
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_fullname, user_profile_photo FROM users WHERE user_phone_number = %s", (phone_number,))
+        user = cursor.fetchone()
+        
+        if user:
+            # print(f"Fetched user data: {user}")
+            return {
+                'user_fullname': user[0],
+                'user_profile_photo': user[1]
+            }
+        else:
+            # print(f"No user found with phone number: {phone_number}")
+            return None
+    except Exception as e:
+        print(f"Error fetching user data: {e}")
+        return None
+    finally:
+        conn.close()
 
 @anvil.server.callable
 def get_users_from_db():
@@ -999,7 +1059,7 @@ def generate_user_id():
 
 @anvil.server.callable
 def add_admins_info(user_id, fullname, email, phone_number, password, user_dob, user_gender, user_joined_date):
-    print(f"user_dob: {user_dob}, user_joined_date: {user_joined_date}")
+    print(f"Received arguments: {user_id}, {fullname}, {email}, {phone_number}, {password}, {user_dob}, {user_gender}, {user_joined_date}")
 
     # Ensure dates are in the correct format
     if isinstance(user_dob, str):
@@ -1007,7 +1067,7 @@ def add_admins_info(user_id, fullname, email, phone_number, password, user_dob, 
     if isinstance(user_joined_date, str):
         user_joined_date = datetime.strptime(user_joined_date, '%Y-%m-%d').date()
 
-    # Hash the password using bcrypt with a cost factor of 12
+    # Hash the password using bcrypt
     hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
     conn = psycopg2.connect(**conn_params)
