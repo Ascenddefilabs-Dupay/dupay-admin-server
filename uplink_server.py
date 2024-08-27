@@ -1,6 +1,6 @@
 import time
 from decimal import Decimal
-
+from psycopg2.extras import RealDictCursor
 import anvil.server
 import requests
 import psycopg2
@@ -462,6 +462,133 @@ def ensure_user_banned_column_exists(connection):
         cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS user_banned BOOLEAN DEFAULT FALSE")
     connection.commit()  # Ensure the change is committed
   
+#bank names
+def create_bank_names_table():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bank_names (
+                bank_id VARCHAR(10) PRIMARY KEY,
+                bank_name VARCHAR(255) UNIQUE NOT NULL,
+                bank_icon_url TEXT
+            );
+        """)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"Error creating table: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+@anvil.server.callable
+def delete_bank(bank_name):
+    conn = get_db_connection()
+
+    try:
+        with conn.cursor() as cur:
+            # Delete the bank entry from the database
+            cur.execute("DELETE FROM bank_names WHERE bank_name = %s", (bank_name,))
+            conn.commit()
+            return f"The bank '{bank_name}' has been deleted successfully."
+    except Exception as e:
+        conn.rollback()
+        return f"Error deleting bank: {e}"
+    finally:
+        conn.close()
+
+# Function to insert bank names into the CockroachDB
+def insert_bank_name(conn, bank_name, bank_icon_url):
+    bank_id = generate_bank_id()
+    if bank_id is None:
+        return "Error generating bank ID."
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM bank_names WHERE bank_name = %s", (bank_name,))
+        result = cur.fetchone()
+        if result is None:
+            cur.execute(
+                "INSERT INTO bank_names (bank_name, bank_icon_url) VALUES (%s, %s)",
+                (bank_name, bank_icon_url)
+            )
+            conn.commit()
+          
+@anvil.server.callable
+def fetch_and_store_bank_data(bank_name, bank_icon_media):
+    if bank_icon_media:
+        # Convert the media object to bytes for Cloudinary upload
+        bank_icon_bytes = bank_icon_media.get_bytes()
+        
+        # Upload the bank icon to Cloudinary
+        file_name = f"{bank_name}.png"
+        cloudinary_response = cloudinary.uploader.upload(bank_icon_bytes, public_id=file_name, folder='bank_icons')
+        cloudinary_url = cloudinary_response.get('url')
+    else:
+        cloudinary_url = None
+
+    # Continue with your database insertion logic
+    conn = get_db_connection()
+    create_bank_names_table()
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT bank_id FROM bank_names WHERE bank_name = %s", (bank_name,))
+            result = cur.fetchone()
+
+            if result:
+                return f"The bank '{bank_name}' is already added."
+            else:
+                bank_id = generate_bank_id()
+                if bank_id is None:
+                    return "Error generating bank ID."
+                
+                cur.execute(
+                    "INSERT INTO bank_names (bank_id, bank_name, bank_icon_url) VALUES (%s, %s, %s)",
+                    (bank_id, bank_name, cloudinary_url)
+                )
+                conn.commit()
+                return f"The bank '{bank_name}' has been successfully added."
+    except Exception as e:
+        conn.rollback()
+        return f"Error adding bank: {e}"
+    finally:
+        conn.close()
+
+def generate_bank_id():
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("SELECT bank_id FROM bank_names WHERE bank_id LIKE 'dupB%' ORDER BY bank_id DESC LIMIT 1;")
+        last_bank_id = cur.fetchone()
+
+        if last_bank_id:
+            last_number = int(last_bank_id[0][4:]) + 1
+        else:
+            last_number = 1
+
+        new_bank_id = f"dupB{last_number:04d}"
+        return new_bank_id
+    except Exception as e:
+        print(f"Error generating bank ID: {e}")
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
+@anvil.server.callable
+def get_bank_names():
+    conn = get_db_connection()
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT bank_name, bank_icon_url FROM bank_names")
+        banks = cur.fetchall()
+
+    conn.close()
+
+    # Ensure the keys match what you're accessing in the template
+    return [{'bank_name': bank[0], 'bank_icon': bank[1]} for bank in banks]
+
 @anvil.server.callable
 def toggle_user_status(phone_number):
     """Toggle the freeze/unfreeze status of a user"""
@@ -971,6 +1098,67 @@ def get_user_for_login(login_input):
     
     return "User not found"
     
+# Function to create the wallet_users_service table (if not already created)
+# Create the wallet_users_service table if it does not exist
+@anvil.server.callable
+def create_wallet_users_service_table():
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS wallet_users_service (
+                    users_service_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    users_service_username VARCHAR(255) NOT NULL,
+                    users_service_phone VARCHAR(20) NOT NULL,
+                    users_service_query TEXT NOT NULL,
+                    users_service_email VARCHAR(255) NOT NULL,
+                    users_update BOOLEAN NOT NULL DEFAULT FALSE,
+                    users_conclusion_about_query TEXT,
+                    created_at TIMESTAMP DEFAULT now(),
+                    updated_at TIMESTAMP DEFAULT now()
+                );
+            """)
+            connection.commit()
+    finally:
+        connection.close()
+
+# Add a new service query to the wallet_users_service table
+@anvil.server.callable
+def add_user_service_query(username, phone, query, email, update=False, conclusion=None):
+    create_wallet_users_service_table()  # Ensure the table exists
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO wallet_users_service (
+                    users_service_username, users_service_phone, users_service_query, 
+                    users_service_email, users_update, users_conclusion_about_query
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+            """, (username, phone, query, email, update, conclusion))
+            connection.commit()
+    finally:
+        connection.close()
+
+# Search for service queries by username
+@anvil.server.callable
+def search_user_service_query(username):
+    create_wallet_users_service_table()  # Ensure the table exists
+    connection = get_db_connection()
+    try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+            if username:
+                cursor.execute("""
+                    SELECT * FROM wallet_users_service WHERE users_service_username = %s
+                """, (username,))
+            else:
+                cursor.execute("""
+                    SELECT * FROM wallet_users_service
+                """)
+            results = cursor.fetchall()
+            return results
+    finally:
+        connection.close()
+        
 # Keep the script running
 anvil.server.wait_forever()
 
