@@ -1062,6 +1062,135 @@ def login_user(email, password):
         return None
 
 
+#report analysis
+@anvil.server.callable
+def get_user_data(username):
+    """Fetch user data from the CockroachDB."""
+    conn = psycopg2.connect(**conn_params)
+    try:
+        with conn.cursor() as cursor:
+            # SQL query to fetch relevant user data
+            query = """
+            SELECT 
+                user_fullname, user_inactive, user_banned
+            FROM users 
+            WHERE users_username = %s
+            """
+            cursor.execute(query, (username,))
+            rows = cursor.fetchall()
+
+            # Structure the data as a list of dictionaries
+            users_data = [
+                {
+                    'user_fullname': row[0],
+                    'user_banned': row[1],
+                    'user_inactive': row[2]
+                }
+                for row in rows
+            ]
+            return users_data
+    except Exception as e:
+        print(f"Error fetching data: {e}")
+        return []
+    finally:
+        conn.close()
+        
+# @anvil.server.callable
+# def get_user_data(username):
+#     conn = psycopg2.connect(**conn_params)
+#     with conn.cursor() as cursor:
+#         cursor.execute("""
+#             SELECT user_fullname, user_inactive, user_banned
+#             FROM users
+#             WHERE user_fullname = %s
+#         """, (username,))
+#         user = cursor.fetchone()
+        
+#         if user:
+#             return {
+#                 'user_fullname': user[0],
+#                 'inactive': user[1],
+#                 'banned': user[2]
+#             }
+#         else:
+#             return None
+
+@anvil.server.callable
+def get_transactions(user_fullname):
+    conn = psycopg2.connect(**conn_params)
+    cur = conn.cursor()
+    
+    try:
+        # Query to get the phone number for the specified user_fullname
+        query_user = '''
+            SELECT user_phone_number
+            FROM users
+            WHERE user_fullname = %s;
+        '''
+        cur.execute(query_user, (user_fullname,))
+        user_row = cur.fetchone()
+
+        if not user_row:
+            return []
+
+        user_phone_number = user_row[0]
+
+        # Query to get transactions based on user_phone_number
+        query_transactions = '''
+            SELECT transaction_type, transaction_timestamp, transaction_currency, transaction_amount
+            FROM transaction_table
+            WHERE user_phone_number = %s;
+        '''
+        cur.execute(query_transactions, (user_phone_number,))
+        rows = cur.fetchall()
+
+        if not rows:
+            return []
+
+        transactions = [
+            {
+                'transaction_type': row[0],
+                'transaction_timestamp': row[1],
+                'transaction_currency': row[2],
+                'transaction_amount': row[3]
+            }
+            for row in rows
+        ]
+
+        return transactions
+    except psycopg2.Error as e:
+        print(f"Database error: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
+# @anvil.server.callable
+# def get_transactions(username):
+#     conn = psycopg2.connect(**conn_params)
+#     with conn.cursor() as cursor:
+#         cursor.execute("""
+#             WITH user_info AS (
+#                 SELECT id
+#                 FROM users
+#                 WHERE user_fullname = %s
+#             )
+#             SELECT transaction_timestamp, transaction_type, transaction_amount
+#             FROM transaction_table
+#             WHERE user_id IN (SELECT id FROM user_info)
+#         """, (username,))
+#         transactions = cursor.fetchall()
+        
+#         transaction_data = []
+#         for transaction in transactions:
+#             transaction_data.append({
+#                 'transaction_timestamp': transaction[0],
+#                 'transaction_type': transaction[1],
+#                 'transaction_amount': transaction[2]
+#             })
+        
+#         return transaction_data
+
+
 @anvil.server.callable
 def check_email_exists(email):
     conn = psycopg2.connect(**conn_params)
