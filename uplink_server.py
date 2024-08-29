@@ -15,7 +15,7 @@ import decimal
 
 
 # Connect to Anvil using the Uplink key
-anvil.server.connect("server_UM4DBKAZUPY673J646YDJPZV-M46VHV6ZUR2C56JM")
+anvil.server.connect("server_SPX2DC7DU4I7VPAPVYVTN2VR-CCTPKIGGPJYMNPYV")
 # # API Configuration
 API_URL = "https://api.exchangerate-api.com/v4/latest/USD"
 COUNTRY_LIST = {
@@ -390,6 +390,97 @@ def fetch_and_store_currencies():
 
 if __name__ == "__main__":
     fetch_and_store_currencies()
+
+@anvil.server.callable
+def get_currency_data():
+    try:
+        conn =  get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("SELECT admins_add_currency_country, admins_add_currency_code ,admins_add_currency_icon FROM admins_add_currency")
+        currency_data = cur.fetchall()
+
+        cur.close()
+        conn.close()
+
+        return [{"country": row[0], "code": row[1],"icon" : row[2]} for row in currency_data]
+    except Exception as e:
+        print(f"Error fetching currency data: {e}")
+        return []
+
+@anvil.server.callable
+def delete_currency_by_code(currency_code):
+    """Deletes a currency type from the database based on currency code."""
+    try:
+        conn =  get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            DELETE FROM admins_add_currency
+            WHERE admins_add_currency_code = %s
+        """, (currency_code,))
+        
+        deleted_count = cur.rowcount
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        return deleted_count > 0
+    except Exception as e:
+        print(f"Error deleting currency: {e}")
+        raise e
+
+@anvil.server.callable
+def add_currency(country_name, currency_code, currency_icon_media):
+    try:
+        file_name = f"{currency_code}_{country_name}.png"
+        local_file_path = os.path.join('media/profile_photos', file_name)
+
+        # Create the directory if it doesn't exist
+        os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+
+        # Save the image locally
+        with open(local_file_path, "wb") as f:
+            f.write(currency_icon_media.get_bytes())
+
+        # Upload the image to Cloudinary
+        cloudinary_response = cloudinary.uploader.upload(local_file_path, folder='profile_photos')
+        cloudinary_url = cloudinary_response.get('url')
+
+        # Store the file path in the database
+        conn =  get_db_connection()
+        cur = conn.cursor()
+
+        # Check if the entry already exists
+        cur.execute(
+            "SELECT * FROM admins_add_currency WHERE admins_add_currency_country = %s AND admins_add_currency_code = %s",
+            (country_name, currency_code)
+        )
+        existing_entry = cur.fetchone()
+
+        if existing_entry:
+            cur.close()
+            conn.close()
+            return False, "Country with this currency code already exists"
+
+        # Insert the new currency with the icon path
+        sql = """
+        INSERT INTO admins_add_currency (admins_add_currency_country, admins_add_currency_code, admins_add_currency_icon)
+        VALUES (%s, %s, %s)
+        """
+        data = (country_name, currency_code, cloudinary_url)  # Store the file path as a string
+
+        cur.execute(sql, data)
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        return True, "Currency added successfully"
+    except Exception as e:
+        print(f"Error adding currency: {e}")  # Log the error message
+        return False, f"Failed to add currency: {e}"
 # SQL query to create the admin_add_currency table
 def create_table():
     try:
@@ -925,96 +1016,7 @@ def get_user(phone_number):
 
 # create_table()
 
-@anvil.server.callable
-def get_currency_data():
-    try:
-        conn =  get_db_connection()
-        cur = conn.cursor()
 
-        cur.execute("SELECT admins_add_currency_country, admins_add_currency_code ,admins_add_currency_icon FROM admins_add_currency")
-        currency_data = cur.fetchall()
-
-        cur.close()
-        conn.close()
-
-        return [{"country": row[0], "code": row[1],"icon" : row[2]} for row in currency_data]
-    except Exception as e:
-        print(f"Error fetching currency data: {e}")
-        return []
-
-@anvil.server.callable
-def delete_currency_by_code(currency_code):
-    """Deletes a currency type from the database based on currency code."""
-    try:
-        conn =  get_db_connection()
-        cur = conn.cursor()
-
-        cur.execute("""
-            DELETE FROM admins_add_currency
-            WHERE admins_add_currency_code = %s
-        """, (currency_code,))
-        
-        deleted_count = cur.rowcount
-        conn.commit()
-
-        cur.close()
-        conn.close()
-
-        return deleted_count > 0
-    except Exception as e:
-        print(f"Error deleting currency: {e}")
-        raise e
-
-@anvil.server.callable
-def add_currency(country_name, currency_code, currency_icon_media):
-    try:
-        file_name = f"{currency_code}_{country_name}.png"
-        local_file_path = os.path.join('media/profile_photos', file_name)
-
-        # Create the directory if it doesn't exist
-        os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
-
-        # Save the image locally
-        with open(local_file_path, "wb") as f:
-            f.write(currency_icon_media.get_bytes())
-
-        # Upload the image to Cloudinary
-        cloudinary_response = cloudinary.uploader.upload(local_file_path, folder='profile_photos')
-        cloudinary_url = cloudinary_response.get('url')
-
-        # Store the file path in the database
-        conn =  get_db_connection()
-        cur = conn.cursor()
-
-        # Check if the entry already exists
-        cur.execute(
-            "SELECT * FROM admins_add_currency WHERE admins_add_currency_country = %s AND admins_add_currency_code = %s",
-            (country_name, currency_code)
-        )
-        existing_entry = cur.fetchone()
-
-        if existing_entry:
-            cur.close()
-            conn.close()
-            return False, "Country with this currency code already exists"
-
-        # Insert the new currency with the icon path
-        sql = """
-        INSERT INTO admins_add_currency (admins_add_currency_country, admins_add_currency_code, admins_add_currency_icon)
-        VALUES (%s, %s, %s)
-        """
-        data = (country_name, currency_code, cloudinary_url)  # Store the file path as a string
-
-        cur.execute(sql, data)
-        conn.commit()
-
-        cur.close()
-        conn.close()
-
-        return True, "Currency added successfully"
-    except Exception as e:
-        print(f"Error adding currency: {e}")  # Log the error message
-        return False, f"Failed to add currency: {e}"
 
 
 @anvil.server.callable
@@ -1124,7 +1126,7 @@ def login_user(email, password):
 
 #report analysis
 @anvil.server.callable
-def get_user_data(username):
+def get_user_pie(username):
     """Fetch user data from the CockroachDB."""
     conn = psycopg2.connect(**conn_params)
     try:
@@ -1134,7 +1136,7 @@ def get_user_data(username):
             SELECT 
                 user_fullname, user_inactive, user_banned
             FROM users 
-            WHERE users_username = %s
+            WHERE user_fullname = %s
             """
             cursor.execute(query, (username,))
             rows = cursor.fetchall()
@@ -1154,26 +1156,6 @@ def get_user_data(username):
         return []
     finally:
         conn.close()
-        
-# @anvil.server.callable
-# def get_user_data(username):
-#     conn = psycopg2.connect(**conn_params)
-#     with conn.cursor() as cursor:
-#         cursor.execute("""
-#             SELECT user_fullname, user_inactive, user_banned
-#             FROM users
-#             WHERE user_fullname = %s
-#         """, (username,))
-#         user = cursor.fetchone()
-        
-#         if user:
-#             return {
-#                 'user_fullname': user[0],
-#                 'inactive': user[1],
-#                 'banned': user[2]
-#             }
-#         else:
-#             return None
 
 @anvil.server.callable
 def get_transactions(user_fullname):
@@ -1193,13 +1175,14 @@ def get_transactions(user_fullname):
         if not user_row:
             return []
 
-        user_phone_number = user_row[0]
+        # Ensure user_phone_number is treated as a string
+        user_phone_number = str(user_row[0])
 
         # Query to get transactions based on user_phone_number
         query_transactions = '''
             SELECT transaction_type, transaction_timestamp, transaction_currency, transaction_amount
             FROM transaction_table
-            WHERE user_phone_number = %s;
+            WHERE user_phone_number = %s;  -- Ensure this is treated as a string
         '''
         cur.execute(query_transactions, (user_phone_number,))
         rows = cur.fetchall()
@@ -1207,6 +1190,7 @@ def get_transactions(user_fullname):
         if not rows:
             return []
 
+        # Create a list of transaction dictionaries
         transactions = [
             {
                 'transaction_type': row[0],
@@ -1224,31 +1208,6 @@ def get_transactions(user_fullname):
     finally:
         cur.close()
         conn.close()
-# @anvil.server.callable
-# def get_transactions(username):
-#     conn = psycopg2.connect(**conn_params)
-#     with conn.cursor() as cursor:
-#         cursor.execute("""
-#             WITH user_info AS (
-#                 SELECT id
-#                 FROM users
-#                 WHERE user_fullname = %s
-#             )
-#             SELECT transaction_timestamp, transaction_type, transaction_amount
-#             FROM transaction_table
-#             WHERE user_id IN (SELECT id FROM user_info)
-#         """, (username,))
-#         transactions = cursor.fetchall()
-        
-#         transaction_data = []
-#         for transaction in transactions:
-#             transaction_data.append({
-#                 'transaction_timestamp': transaction[0],
-#                 'transaction_type': transaction[1],
-#                 'transaction_amount': transaction[2]
-#             })
-        
-#         return transaction_data
 
 
 @anvil.server.callable
